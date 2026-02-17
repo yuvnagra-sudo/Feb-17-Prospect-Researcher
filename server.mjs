@@ -141,12 +141,34 @@ async function callGemini(prompt,prov,sys,web,apiKey){
     if(m.includes('quota')||m.includes('limit: 0')||m.includes('RESOURCE_EXHAUSTED'))throw{type:'api_error',message:'Gemini quota exhausted'};
     const rm=m.match(/retry in ([\d.]+)s/i);throw{type:'rate_limit',wait:rm?Math.ceil(parseFloat(rm[1]))*1000:30000};}
   if(!res.ok){const t=await res.text();let m;try{m=JSON.parse(t).error?.message||t}catch{m=t}throw{type:'api_error',message:m};}
-  const data=await res.json();const parts=data.candidates?.[0]?.content?.parts||[];const u=data.usageMetadata||{};
-  let texts=parts.filter(p=>p.text).map(p=>p.text);
-  if(texts.length>1){const c=texts.find(t=>!t.includes('[cite:'));if(c)texts=[c];else texts=[texts[0]];}
-  let research=texts.join('\n');research=research.replace(/\s*\[cite:\s*[\d,\s]+\]/g,'');
+  const data=await res.json();
+
+  // ── FIX: robust text extraction from Gemini grounded responses ──
+  // When web search grounding is used, Gemini may return ALL text parts with [cite:N] markers.
+  // The old approach picked only the first non-cited part, returning undefined (→ empty) if all parts had citations.
+  const parts=data.candidates?.[0]?.content?.parts||[];
+  const u=data.usageMetadata||{};
+
+  // Collect all text parts
+  const allTexts=parts.filter(p=>p.text).map(p=>p.text);
+
+  let research='';
+  if(allTexts.length>0){
+    // Prefer a clean non-cited block if one exists (model summary without inline citations)
+    const clean=allTexts.find(t=>!t.includes('[cite:'));
+    // Fallback: join all text parts and strip citation markers
+    const joined=(clean||allTexts.join('\n')).replace(/\s*\[cite:\s*[\d,\s]+\]/g,'').trim();
+    research=joined;
+  }
+
+  // If we still have no research but the API said it succeeded, mark it as an error so it retries
+  if(!research&&(u.candidatesTokenCount||0)===0){
+    throw{type:'api_error',message:'Gemini returned empty response — possible grounding-only output. Will retry.'};
+  }
+
   return{research,inputTokens:u.promptTokenCount||0,outputTokens:u.candidatesTokenCount||0,cacheRead:0,cacheWrite:0};
 }
+
 async function callAnthropic(prompt,prov,sys,web,apiKey){
   const body={model:prov.model,max_tokens:4000,system:[{type:'text',text:sys,cache_control:{type:'ephemeral'}}],messages:[{role:'user',content:prompt}]};
   if(web)body.tools=[{type:'web_search_20250305',name:'web_search'}];
@@ -241,8 +263,13 @@ async function runJob(jobId){
       }catch(err){
         lastErr=err.message||String(err);
         if(err.type==='rate_limit'){retries++;const w=rlHit(job.provider,err.wait);
-          emit({type:'log',level:'warn',msg:`\u23F3 Rate limit "${row.company}" \u2014 retry ${Math.round(w/1000)}s (${retries}/5)`});
+          emit({type:'log',level:'warn',msg:`⏳ Rate limit "${row.company}" — retry ${Math.round(w/1000)}s (${retries}/5)`});
           emit({type:'rate_info',delay:rs.delay,hits:rs.hits});await sleep(w);
+        }else if(err.type==='api_error'&&err.message?.includes('empty response')){
+          // Gemini empty response — retry with backoff but don't count as rate limit
+          retries++;const w=Math.min(2000*retries,10000);
+          emit({type:'log',level:'warn',msg:`⚠️ Empty response "${row.company}" — retry ${retries}/5 in ${w/1000}s`});
+          await sleep(w);
         }else{S.uR.run('error',null,lastErr,0,0,0,0,jobId,row.idx);fail++;done=true;
           emit({type:'result',idx:row.idx,company:row.company,status:'error',error:lastErr});
           emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:row.company});}
@@ -359,11 +386,11 @@ const server=createServer(async(req,res)=>{
 });
 
 server.listen(PORT,process.env.HOST||'0.0.0.0',()=>{
-  console.log(`\n  \u{1F50D} Prospect Researcher v6 (multi-user)`);
-  console.log('  '+'\u2501'.repeat(30));
+  console.log(`\n  🔍 Prospect Researcher v6 (multi-user)`);
+  console.log('  '+'━'.repeat(30));
   console.log(`  URL:  http://localhost:${PORT}`);
   console.log(`  Data: ${DD}`);
   console.log(`  JWT:  ${process.env.JWT_SECRET?'persistent (env)':'ephemeral (set JWT_SECRET)'}`);
-  console.log('  '+'\u2501'.repeat(30)+'\n');
+  console.log('  '+'━'.repeat(30)+'\n');
 });
 const HTML=readFileSync(new URL('./ui.html',import.meta.url),'utf8');

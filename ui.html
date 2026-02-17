@@ -22,7 +22,6 @@ body{font-family:'IBM Plex Sans',system-ui,sans-serif;background:var(--bg);color
 .shell{display:flex;flex-direction:column;min-height:100vh}
 .topbar{height:48px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;background:var(--surface);flex-shrink:0;position:sticky;top:0;z-index:100}
 .topbar .logo{font-size:14px;font-weight:700;color:var(--fg);letter-spacing:-.3px;display:flex;align-items:center;gap:6px}
-.topbar .logo span{opacity:.5}
 .topbar-r{margin-left:auto;display:flex;align-items:center;gap:8px}
 .main{flex:1;max-width:860px;width:100%;margin:0 auto;padding:24px 20px 80px}
 
@@ -113,6 +112,18 @@ textarea.ta:focus{border-color:var(--pri)}
 .banner-ok{background:var(--green-d);border:1px solid rgba(34,197,94,.12);color:var(--green)}
 .banner-err{background:var(--red-d);border:1px solid rgba(239,68,68,.12);color:var(--red)}
 
+/* ── Collapsible panel (new) ── */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:12px}
+.panel-hd{display:flex;align-items:center;gap:8px;padding:10px 14px;cursor:pointer;user-select:none;transition:background .12s}
+.panel-hd:hover{background:rgba(255,255,255,.02)}
+.panel-hd .panel-icon{font-size:13px;flex-shrink:0}
+.panel-hd .panel-title{font-size:12px;font-weight:600;color:var(--text);flex:1;text-transform:uppercase;letter-spacing:.4px}
+.panel-hd .panel-meta{font-size:11px;color:var(--dim)}
+.panel-hd .chevron{font-size:10px;color:var(--dim);transition:transform .2s;flex-shrink:0}
+.panel-hd.open .chevron{transform:rotate(180deg)}
+.panel-body{border-top:1px solid var(--border);padding:14px}
+.panel-body.hidden{display:none}
+
 /* Template pills (inline) */
 .tmpl-pill{padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:var(--card);cursor:pointer;font-size:11px;font-weight:500;transition:all .12s;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .tmpl-pill:hover{border-color:var(--border-h)}.tmpl-pill.active{border-color:var(--pri);background:var(--pri-dim);color:var(--pri-h)}
@@ -174,7 +185,7 @@ textarea.ta:focus{border-color:var(--pri)}
   <!-- Upload zone -->
   <div class="drop" id="dz" onclick="document.getElementById('fi').click()">
     <input type="file" id="fi" accept=".csv" style="display:none"/>
-    <div class="ico" id="dzIco">&#x1F4C1;</div>
+    <div class="ico" id="dzIco">📁</div>
     <div class="main-text" id="dzText">Drop your CSV here, or click to browse</div>
     <div class="sub-text" id="dzSub">Any CSV with a company name column</div>
   </div>
@@ -193,7 +204,7 @@ textarea.ta:focus{border-color:var(--pri)}
     <button class="b b-pri" id="btnGo" onclick="startResearch()" style="margin-left:4px">Research</button>
   </div>
 
-  <!-- Column mapping pills (appears after upload, collapsible) -->
+  <!-- Column mapping pills (appears after upload) -->
   <div id="mapBar" style="display:none;margin-top:10px">
     <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
       <span id="mapPills"></span>
@@ -201,40 +212,47 @@ textarea.ta:focus{border-color:var(--pri)}
     </div>
   </div>
 
-  <!-- Prompt editor (main screen, collapsible) -->
-  <div id="promptSection" style="display:none;margin-top:12px">
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer" onclick="document.getElementById('promptInner').style.display=document.getElementById('promptInner').style.display==='none'?'':'none'">
-      <span style="font-size:11px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.5px">System Prompt</span>
-      <span style="font-size:10px;color:var(--dim)">&darr;</span>
+  <!-- ── System Prompt Panel (collapsible card, visible by default) ── -->
+  <div class="panel" id="promptSection" style="display:none">
+    <div class="panel-hd open" id="promptHd" onclick="togglePanel('prompt')">
+      <span class="panel-icon">⚙️</span>
+      <span class="panel-title">System Prompt</span>
+      <span class="panel-meta" id="promptMeta"></span>
+      <span class="chevron">▼</span>
     </div>
-    <div id="promptInner" style="display:none">
-      <textarea class="ta" id="promptEdit" style="min-height:160px"></textarea>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <button class="b b-ghost b-sm" onclick="customPrompt=document.getElementById('promptEdit').value">Save</button>
-        <button class="b b-ghost b-sm" onclick="customPrompt=templates[selTmpl]?.prompt||'';document.getElementById('promptEdit').value=customPrompt">Reset</button>
+    <div class="panel-body" id="promptBody">
+      <textarea class="ta" id="promptEdit" style="min-height:160px" oninput="promptDirty=true"></textarea>
+      <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+        <button class="b b-pri b-sm" onclick="savePrompt()">Save</button>
+        <button class="b b-ghost b-sm" onclick="resetPrompt()">Reset to template</button>
+        <span id="promptSaved" style="font-size:11px;color:var(--green);opacity:0;transition:opacity .3s">✓ Saved</span>
       </div>
     </div>
   </div>
 
-  <!-- Preview (max 5, collapsible) -->
-  <div id="previewSection" style="display:none;margin-top:12px">
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;cursor:pointer" onclick="document.getElementById('previewInner').style.display=document.getElementById('previewInner').style.display==='none'?'':'none'">
-      <span style="font-size:11px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.5px">Preview</span>
-      <span style="font-size:10px;color:var(--dim)" id="previewCount"></span>
-      <span style="font-size:10px;color:var(--dim)">&darr;</span>
+  <!-- ── Preview Panel (collapsible card, visible by default) ── -->
+  <div class="panel" id="previewSection" style="display:none">
+    <div class="panel-hd open" id="previewHd" onclick="togglePanel('preview')">
+      <span class="panel-icon">👁</span>
+      <span class="panel-title">Prompt Preview</span>
+      <span class="panel-meta" id="previewCount"></span>
+      <span class="chevron">▼</span>
     </div>
-    <div id="previewInner" style="display:none"><div id="previewList"></div></div>
+    <div class="panel-body" id="previewBody">
+      <p style="font-size:11px;color:var(--dim);margin-bottom:10px">This is exactly what gets sent to the AI for each row. Verify columns look right before running.</p>
+      <div id="previewList"></div>
+    </div>
   </div>
 
   <!-- Banner -->
   <div id="completeBanner" style="display:none;margin-top:14px"></div>
 
-  <!-- Running state (replaces just a log — now has visible stop) -->
+  <!-- Running state -->
   <div id="runningState" style="display:none;margin-top:12px">
     <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
       <div class="pbar" style="flex:1"><div class="pfill" id="progBarInline"></div></div>
       <span style="font-size:11px;font-family:var(--mono);color:var(--sub);white-space:nowrap" id="progTextInline">0 / 0</span>
-      <button class="b b-red b-sm" onclick="cancelJob()" style="flex-shrink:0">&#x23F9; Stop</button>
+      <button class="b b-red b-sm" onclick="cancelJob()" style="flex-shrink:0">⏹ Stop</button>
     </div>
     <div class="log-box" id="logBox"></div>
   </div>
@@ -256,11 +274,22 @@ textarea.ta:focus{border-color:var(--pri)}
 let token=localStorage.getItem('pr_token')||'',currentUser=null,isSignup=true;
 let providers={},templates={},selProv='gemini',selTmpl='b2b-outreach';
 let csvText='',rowCount=0,jobId=null,es=null,results=[];
-let colMap={},csvHeaders=[],useWeb=true,customPrompt='';
+let colMap={},csvHeaders=[],useWeb=true,customPrompt='',promptDirty=false;
 const ROLES=['company','website','contact','email','title','phone','address','industry','notes','rating','reviews'];
+
+// Panel open state
+const panelState={prompt:true,preview:true};
 
 function api(p,o={}){o.headers={...(o.headers||{}),'content-type':'application/json'};if(token)o.headers.authorization='Bearer '+token;return fetch(p,o);}
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+
+function togglePanel(name){
+  panelState[name]=!panelState[name];
+  const hd=document.getElementById(name+'Hd');
+  const body=document.getElementById(name+'Body');
+  if(panelState[name]){hd.classList.add('open');body.classList.remove('hidden');}
+  else{hd.classList.remove('open');body.classList.add('hidden');}
+}
 
 // ─── Auth ───
 function flipAuth(){isSignup=!isSignup;document.getElementById('authSub').textContent=isSignup?'Create an account to get started':'Welcome back';
@@ -284,8 +313,15 @@ function buildSelects(){
   const ps=document.getElementById('provSel');ps.innerHTML=Object.entries(providers).map(([id,p])=>'<option value="'+id+'"'+(id===selProv?' selected':'')+(p.hasKey?'':' disabled')+'>'+p.name+(p.hasKey?'':' (no key)')+'</option>').join('');
   autoSel();}
 function autoSel(){if(providers[selProv]?.hasKey)return;const f=Object.entries(providers).find(([,v])=>v.hasKey);if(f){selProv=f[0];document.getElementById('provSel').value=selProv;}}
-function pickTmpl(id){selTmpl=id;customPrompt=templates[id]?.prompt||'';const pe=document.getElementById('promptEdit');if(pe)pe.value=customPrompt;if(csvText)refreshPreview(colMap);}
+function pickTmpl(id){selTmpl=id;resetPrompt();if(csvText)refreshPreview(colMap);}
 function pickProv(id){selProv=id;updateWS();updateCost();}
+
+// ─── Prompt helpers ───
+function savePrompt(){customPrompt=document.getElementById('promptEdit').value;promptDirty=false;
+  const s=document.getElementById('promptSaved');s.style.opacity='1';setTimeout(()=>s.style.opacity='0',1500);}
+function resetPrompt(){customPrompt=templates[selTmpl]?.prompt||'';document.getElementById('promptEdit').value=customPrompt;
+  promptDirty=false;document.getElementById('promptMeta').textContent='';updatePromptMeta();}
+function updatePromptMeta(){const lines=(customPrompt||'').split('\n').length;document.getElementById('promptMeta').textContent=lines+' lines';}
 
 // ─── Web Search ───
 function updateWS(){const p=providers[selProv];const on=useWeb&&p?.webSearch;document.getElementById('wsBg').style.background=on?'var(--pri)':'var(--dim)';document.getElementById('wsKnob').style.left=on?'15px':'2px';document.getElementById('wsLabel').textContent=on?'Web':'Off';}
@@ -297,7 +333,7 @@ dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');}
 dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');if(e.dataTransfer.files[0])loadFile(e.dataTransfer.files[0]);});
 fi.addEventListener('change',()=>{if(fi.files[0])loadFile(fi.files[0]);});
 async function loadFile(f){csvText=await f.text();dz.classList.add('loaded');
-  document.getElementById('dzIco').textContent='\u2705';document.getElementById('dzText').innerHTML='<strong>'+esc(f.name)+'</strong>';
+  document.getElementById('dzIco').textContent='✅';document.getElementById('dzText').innerHTML='<strong>'+esc(f.name)+'</strong>';
   document.getElementById('dzSub').textContent='Click to change';
   await refreshPreview();document.getElementById('configBar').style.display='flex';updateCost();}
 
@@ -305,24 +341,34 @@ async function loadFile(f){csvText=await f.text();dz.classList.add('loaded');
 async function refreshPreview(om){try{const body={csv:csvText};if(om)body.colMapOverride=om;
     const d=await(await api('/api/preview',{method:'POST',body:JSON.stringify(body)})).json();if(d.error){alert(d.error);return;}
     colMap=d.colMap;csvHeaders=d.headers;rowCount=d.total;
-    document.getElementById('dzSub').textContent=rowCount+' prospects \u00B7 Click to change';
+    document.getElementById('dzSub').textContent=rowCount+' prospects · Click to change';
     renderMapPills();renderPreviews(d.previews,d.total);
+    // Show prompt panel and populate
     document.getElementById('promptSection').style.display='';
-    document.getElementById('promptEdit').value=customPrompt;}catch(e){alert(e.message);}}
+    document.getElementById('promptEdit').value=customPrompt;
+    updatePromptMeta();
+  }catch(e){alert(e.message);}}
+
 function renderPreviews(pv,total){
   document.getElementById('previewSection').style.display='';
-  document.getElementById('previewCount').textContent='('+Math.min(5,pv.length)+' of '+total+')';
+  document.getElementById('previewCount').textContent=Math.min(5,pv.length)+' of '+total+' shown';
   document.getElementById('previewList').innerHTML=pv.slice(0,5).map(p=>'<div class="prev-card"><h4>'+esc(p.company)+'</h4><pre>'+esc(p.prompt)+'</pre></div>').join('');}
+
 function renderMapPills(){document.getElementById('mapBar').style.display='';
   document.getElementById('mapPills').innerHTML=Object.entries(colMap).filter(([,v])=>v).map(([r,c])=>{
     const colors={company:'var(--pri-dim)',website:'var(--green-d)',email:'var(--green-d)',contact:'rgba(245,158,11,.08)'};
     const tc={company:'var(--pri-h)',website:'var(--green)',email:'var(--green)',contact:'var(--amber)'};
     return'<span class="pill" style="background:'+(colors[r]||'var(--card)')+';color:'+(tc[r]||'var(--sub)')+'">'+r+': '+esc(c.length>20?c.slice(0,18)+'..':c)+'</span>';}).join(' ');}
+
 function updateCost(){const p=providers[selProv];if(!p||!rowCount)return;const per=(p.inputCost*2000+p.outputCost*2000)/1e6+(useWeb&&p.webSearch?(p.webCostPerCall||0):0);
-  const el=document.getElementById('costChip');el.style.display='inline-flex';document.getElementById('costText').innerHTML=rowCount+' rows &asymp; <b>$'+(per*rowCount).toFixed(2)+'</b>';}
+  const el=document.getElementById('costChip');el.style.display='inline-flex';document.getElementById('costText').innerHTML=rowCount+' rows ≈ <b>$'+(per*rowCount).toFixed(2)+'</b>';}
 
 // ─── Research ───
-async function startResearch(){if(!csvText||!selProv)return;const btn=document.getElementById('btnGo');btn.disabled=true;btn.textContent='Starting...';
+async function startResearch(){
+  if(!csvText||!selProv)return;
+  // Auto-save prompt if dirty
+  if(promptDirty)savePrompt();
+  const btn=document.getElementById('btnGo');btn.disabled=true;btn.textContent='Starting...';
   results=[];document.getElementById('resultsList').innerHTML='';document.getElementById('completeBanner').style.display='none';
   document.getElementById('runningState').style.display='';document.getElementById('logBox').innerHTML='';
   try{const r=await api('/api/research',{method:'POST',body:JSON.stringify({csv:csvText,provider:selProv,useWebSearch:useWeb&&!!providers[selProv]?.webSearch,systemPrompt:customPrompt,templateId:selTmpl,colMapOverride:colMap})});
@@ -336,15 +382,15 @@ function connectSSE(id){if(es)es.close();es=new EventSource('/api/stream/'+id+'?
     if(d.type==='progress'){const pct=Math.round((d.succeeded+d.failed)/d.total*100);
       document.getElementById('progBar').style.width=pct+'%';
       document.getElementById('progBarInline').style.width=pct+'%';
-      document.getElementById('progText').innerHTML='<b>'+d.succeeded+'</b>'+(d.failed?' <span style="color:var(--red)">'+d.failed+' err</span>':'')+' / '+d.total+' &mdash; '+esc(d.current);
+      document.getElementById('progText').innerHTML='<b>'+d.succeeded+'</b>'+(d.failed?' <span style="color:var(--red)">'+d.failed+' err</span>':'')+' / '+d.total+' — '+esc(d.current);
       document.getElementById('progTextInline').innerHTML=d.succeeded+(d.failed?'+'+d.failed+'err':'')+' / '+d.total;}
     if(d.type==='log')addLog(d.msg);
     if(d.type==='rate_info')addLog('Throttle: '+Math.round(d.delay)+'ms');
     if(d.type==='done'){document.getElementById('progressBar').style.display='none';document.getElementById('runningState').style.display='none';
       const b=document.getElementById('completeBanner');b.style.display='flex';
       const ok=d.status==='complete';b.className='banner fade-in '+(ok?'banner-ok':'banner-err');
-      let t=(ok?'\u2705':'\u26A0')+' '+d.succeeded+' researched, '+d.failed+' failed';
-      if(d.cost)t+=' \u00B7 $'+d.cost;if(d.elapsed)t+=' \u00B7 '+d.elapsed+'s';
+      let t=(ok?'✅':'⚠')+' '+d.succeeded+' researched, '+d.failed+' failed';
+      if(d.cost)t+=' · $'+d.cost;if(d.elapsed)t+=' · '+d.elapsed+'s';
       b.innerHTML='<span style="flex:1">'+t+'</span><button class="b b-ghost b-sm" onclick="exportCSV()">Export CSV</button>';
       if(d.status==='paused')b.innerHTML+='<button class="b b-green b-sm" onclick="resumeJob('+jobId+')">Resume</button>';
       es.close();}};}
@@ -360,21 +406,21 @@ async function resumeJob(jid){try{const d=await(await api('/api/resume/'+jid,{me
 function openDrawer(mode){document.getElementById('drawerOverlay').classList.add('open');document.getElementById('drawer').classList.add('open');
   const c=document.getElementById('drawerContent');
   if(mode==='settings')c.innerHTML=buildSettingsDrawer();
-  else if(mode==='history'){c.innerHTML='<h3>Job History <span class="b b-ghost b-sm" onclick="closeDrawer()">\u2715</span></h3><div id="histList"></div>';loadHistory();}
+  else if(mode==='history'){c.innerHTML='<h3>Job History <span class="b b-ghost b-sm" onclick="closeDrawer()">✕</span></h3><div id="histList"></div>';loadHistory();}
   else if(mode==='mapping')c.innerHTML=buildMappingDrawer();
   else if(mode==='prompt')c.innerHTML=buildPromptDrawer();}
 function closeDrawer(){document.getElementById('drawerOverlay').classList.remove('open');document.getElementById('drawer').classList.remove('open');}
 
 function buildSettingsDrawer(){
-  let h='<h3>Settings <span class="b b-ghost b-sm" onclick="closeDrawer()">\u2715</span></h3>';
-  h+='<div class="drawer-section"><div class="label">API Keys</div><p style="font-size:11px;color:var(--dim);margin-bottom:8px">Keys are stored per-account. <a href="https://aistudio.google.com/apikey" target="_blank">Get Gemini key</a></p>';
+  let h='<h3>Settings <span class="b b-ghost b-sm" onclick="closeDrawer()">✕</span></h3>';
+  h+='<div class="drawer-section"><div class="label">API Keys</div><p style="font-size:11px;color:var(--dim);margin-bottom:8px">Keys are stored per-account. <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--pri-h)">Get Gemini key</a></p>';
   const keys=[['Gemini','GEMINI_API_KEY','gemini'],['Anthropic','ANTHROPIC_API_KEY','claude'],['OpenAI','OPENAI_API_KEY','gpt5'],['DeepSeek','DEEPSEEK_API_KEY','deepseek']];
-  keys.forEach(([label,env,pid])=>{h+='<div class="key-row"><span class="lbl">'+label+'</span><input class="inp" type="password" id="dk_'+env+'" placeholder="Paste key..." style="flex:1"/><button class="b b-ghost b-sm" onclick="saveKeyD(\''+env+'\')">Save</button><span class="st" id="dks_'+env+'">'+(providers[pid]?.hasKey?'\u2705':'')+'</span></div>';});
+  keys.forEach(([label,env,pid])=>{h+='<div class="key-row"><span class="lbl">'+label+'</span><input class="inp" type="password" id="dk_'+env+'" placeholder="Paste key..." style="flex:1"/><button class="b b-ghost b-sm" onclick="saveKeyD(\''+env+'\')">Save</button><span class="st" id="dks_'+env+'">'+(providers[pid]?.hasKey?'✅':'')+'</span></div>';});
   h+='</div>';
   return h;}
 
 function buildMappingDrawer(){
-  let h='<h3>Column Mapping <span class="b b-ghost b-sm" onclick="closeDrawer()">\u2715</span></h3>';
+  let h='<h3>Column Mapping <span class="b b-ghost b-sm" onclick="closeDrawer()">✕</span></h3>';
   h+='<p style="font-size:11px;color:var(--dim);margin-bottom:12px">Map CSV columns to roles for better prompts.</p>';
   ROLES.forEach(role=>{const cur=colMap[role]||'';
     let opts='<option value="">(none)</option>';csvHeaders.forEach(c=>{opts+='<option value="'+esc(c)+'"'+(c===cur?' selected':'')+'>'+esc(c)+'</option>';});
@@ -385,23 +431,23 @@ function applyDrawerMap(){const m={};document.querySelectorAll('.mrow select').f
 
 async function saveKeyD(env){const v=document.getElementById('dk_'+env).value.trim();if(!v)return;
   providers=await(await api('/api/setkey',{method:'POST',body:JSON.stringify({envName:env,key:v})})).json();
-  document.getElementById('dks_'+env).textContent='\u2705';buildSelects();}
+  document.getElementById('dks_'+env).textContent='✅';buildSelects();}
 
 // ─── History ───
 async function loadHistory(){try{const jobs=await(await api('/api/jobs')).json();const el=document.getElementById('histList');
     if(!jobs.length){el.innerHTML='<p style="font-size:12px;color:var(--dim)">No jobs yet.</p>';return;}
     el.innerHTML=jobs.map(j=>{const sc={complete:'badge-ok',running:'badge-run',paused:'badge-warn',cancelled:'badge-warn',queued:'badge-run',error:'badge-err'};
-      return'<div class="hist-item" onclick="viewJob('+j.id+');closeDrawer()"><div style="font-size:16px">'+(j.templateIcon||'\u270F')+'</div><div class="hist-info"><div class="hist-name">'+esc(j.name)+'</div><div class="hist-meta">'+esc(j.created_at)+' \u00B7 $'+(j.cost||0).toFixed(3)+'</div></div><span class="badge '+(sc[j.status]||'')+'">'+j.status+'</span>'
+      return'<div class="hist-item" onclick="viewJob('+j.id+');closeDrawer()"><div style="font-size:16px">'+(j.templateIcon||'✏')+'</div><div class="hist-info"><div class="hist-name">'+esc(j.name)+'</div><div class="hist-meta">'+esc(j.created_at)+' · $'+(j.cost||0).toFixed(3)+'</div></div><span class="badge '+(sc[j.status]||'')+'">'+j.status+'</span>'
       +(j.status==='complete'?'<span class="b b-ghost b-sm" onclick="event.stopPropagation();exportCSV2('+j.id+')">CSV</span>':'')
       +(j.status==='paused'?'<span class="b b-green b-sm" onclick="event.stopPropagation();resumeJob('+j.id+');closeDrawer()">Resume</span>':'')
-      +'<span class="b b-ghost b-sm" onclick="event.stopPropagation();deleteJob('+j.id+')">\u2715</span></div>';}).join('');}catch{}}
+      +'<span class="b b-ghost b-sm" onclick="event.stopPropagation();deleteJob('+j.id+')">✕</span></div>';}).join('');}catch{}}
 async function viewJob(jid){jobId=jid;results=[];document.getElementById('resultsList').innerHTML='';document.getElementById('completeBanner').style.display='none';connectSSE(jid);}
 async function deleteJob(jid){if(!confirm('Delete this job?'))return;await api('/api/jobs/'+jid,{method:'DELETE'});loadHistory();}
 
 // ─── Helpers ───
 function addLog(msg){const b=document.getElementById('logBox');b.innerHTML+='<div>'+new Date().toLocaleTimeString()+' '+esc(msg)+'</div>';b.scrollTop=b.scrollHeight;}
 function addRC(r){const list=document.getElementById('resultsList');const div=document.createElement('div');div.className='result fade-in';const ok=r.status==='success';
-  div.innerHTML='<div class="result-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'\':\'none\'"><div class="result-dot" style="background:'+(ok?'var(--green)':'var(--red)')+'"></div><span class="result-name">'+esc(r.company)+'</span><span style="font-size:11px;color:var(--dim)">\u25BC</span></div><div class="result-body" style="display:none"><div class="md">'+(ok?mdH(r.research):'<p style="color:var(--red)">'+esc(r.error)+'</p>')+'</div></div>';
+  div.innerHTML='<div class="result-head" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'\':\'none\'"><div class="result-dot" style="background:'+(ok?'var(--green)':'var(--red)')+'"></div><span class="result-name">'+esc(r.company)+'</span><span style="font-size:11px;color:var(--dim)">▼</span></div><div class="result-body" style="display:none"><div class="md">'+(ok?mdH(r.research):'<p style="color:var(--red)">'+esc(r.error)+'</p>')+'</div></div>';
   list.appendChild(div);}
 function mdH(t){if(!t)return'';return t.split('\n').map(l=>{const b=l.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');if(l.startsWith('# '))return'<h3>'+b.slice(2)+'</h3>';if(l.match(/^\d+\./))return'<p><strong>'+b+'</strong></p>';if(l.startsWith('- ')||l.startsWith('* '))return'<div class="blt">'+b.slice(2)+'</div>';if(!l.trim())return'';return'<p>'+b+'</p>';}).join('');}
 
