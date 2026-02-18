@@ -134,7 +134,14 @@ function rlOk(p){const r=gRL(p);r.okRun++;if(r.okRun>=5&&r.delay>r.min){r.delay=
 // ─── LLM Callers ───
 async function callGemini(prompt,prov,sys,web,apiKey){
   const url=`https://generativelanguage.googleapis.com/v1beta/models/${prov.model}:generateContent?key=${apiKey}`;
-  const body={systemInstruction:{parts:[{text:sys}]},contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:4000}};
+  const body={
+    systemInstruction:{parts:[{text:sys}]},
+    contents:[{parts:[{text:prompt}]}],
+    generationConfig:{
+      maxOutputTokens:16000,        // raised — 4000 was too low when thinking tokens consume budget
+      thinkingConfig:{thinkingBudget:0}  // disable thinking: faster + no hidden token consumption
+    }
+  };
   if(web)body.tools=[{google_search:{}}];
   const res=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   if(res.status===429){const t=await res.text();let m;try{m=JSON.parse(t).error?.message||t}catch{m=t}
@@ -143,21 +150,23 @@ async function callGemini(prompt,prov,sys,web,apiKey){
   if(!res.ok){const t=await res.text();let m;try{m=JSON.parse(t).error?.message||t}catch{m=t}throw{type:'api_error',message:m};}
   const data=await res.json();
 
-  // ── Robust text extraction from Gemini grounded responses ──
-  // Gemini with web search returns multiple text parts interleaved with tool-use parts.
-  // ALWAYS join ALL text parts then strip citations — never pick a single "clean" part,
-  // as the first citation-free chunk is usually just the header/pages-checked section,
-  // which would discard the entire rest of the response.
-  const parts=data.candidates?.[0]?.content?.parts||[];
+  const candidate=data.candidates?.[0];
+  const finishReason=candidate?.finishReason;
+  const parts=candidate?.content?.parts||[];
   const u=data.usageMetadata||{};
 
-  // Collect ALL text parts (ignore executableCode, toolUse, etc.)
+  // Collect ALL text parts (ignore executableCode, toolUse, etc.) and join before stripping citations.
+  // Never select a single "clean" part — the first citation-free chunk is usually just the
+  // pages-checked header, which would silently discard the entire rest of the response.
   const allTexts=parts.filter(p=>typeof p.text==='string'&&p.text.trim()).map(p=>p.text);
-
-  // Join everything, then strip [cite:N] markers
   const research=allTexts.join('\n').replace(/\s*\[cite:\s*[\d,\s]+\]/g,'').trim();
 
-  // If empty and zero output tokens, the model returned nothing — retry
+  // If Gemini stopped because it hit the token limit, treat as retriable error
+  if(finishReason==='MAX_TOKENS'){
+    throw{type:'api_error',message:`Gemini hit MAX_TOKENS limit (output was ${u.candidatesTokenCount} tokens) — retrying with fresh request.`};
+  }
+
+  // Empty response with no output tokens — retry
   if(!research&&(u.candidatesTokenCount||0)===0){
     throw{type:'api_error',message:'Gemini returned empty response — possible grounding-only output. Will retry.'};
   }
@@ -229,8 +238,12 @@ function buildPrompt(row,map,idx){
   return{company,prompt:pr};
 }
 
-// ─── Job Runner ───
+// ─── Job Runner (parallel worker pool) ───
 const actv=new Map();
+
+// How many concurrent requests to allow per provider
+const CONCURRENCY={gemini:5,claude:5,haiku:5,gpt5:4,openai:5,deepseek:5};
+
 async function runJob(jobId){
   const job=S.gJ.get(jobId);if(!job)return;const prov=PROVDEFS[job.provider];if(!prov)return;
   const apiKey=userKey(job.user_id,prov.envName);
@@ -238,46 +251,83 @@ async function runJob(jobId){
   const ctx={cancelled:false,listeners:new Set()};actv.set(jobId,ctx);
   const emit=d=>{const msg=`data: ${JSON.stringify(d)}\n\n`;for(const l of ctx.listeners){try{l.write(msg);}catch{}}};
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
   let pending=S.gP.all(jobId);
-  if(!pending.length){S.uJ.run(job.succeeded,job.failed,'complete',job.total_in,job.total_out,job.total_cr,job.total_cw,job.cost,job.elapsed,jobId);emit({type:'done',status:'complete',succeeded:job.succeeded,failed:job.failed});actv.delete(jobId);return;}
+  if(!pending.length){
+    S.uJ.run(job.succeeded,job.failed,'complete',job.total_in,job.total_out,job.total_cr,job.total_cw,job.cost,job.elapsed,jobId);
+    emit({type:'done',status:'complete',succeeded:job.succeeded,failed:job.failed});
+    actv.delete(jobId);return;
+  }
   S.uJ.run(job.succeeded,job.failed,'running',job.total_in,job.total_out,job.total_cr,job.total_cw,job.cost,job.elapsed,jobId);
-  const t0=Date.now();let ok=job.succeeded,fail=job.failed,tIn=job.total_in,tOut=job.total_out,tCR=job.total_cr,tCW=job.total_cw;
-  for(const r of S.gC.all(jobId)) emit({type:'result',idx:r.idx,company:r.company,status:r.status,research:r.research,error:r.error,inputTokens:r.input_tokens,outputTokens:r.output_tokens});
-  emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:'Resuming...'});
-  const rs=gRL(job.provider);const queue=[...pending];
-  while(queue.length>0&&!ctx.cancelled){
-    const row=queue.shift();if(!row)break;
-    emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:row.company});
-    let retries=0,done=false,lastErr='';
-    while(!done&&retries<5&&!ctx.cancelled){
-      try{
-        const r=await callLLM(row.prompt,prov,job.system_prompt,!!job.use_web_search,apiKey);
-        S.uR.run('success',r.research,null,r.inputTokens,r.outputTokens,r.cacheRead,r.cacheWrite,jobId,row.idx);
-        ok++;tIn+=r.inputTokens;tOut+=r.outputTokens;tCR+=r.cacheRead;tCW+=r.cacheWrite;done=true;rlOk(job.provider);
-        emit({type:'result',idx:row.idx,company:row.company,status:'success',research:r.research,inputTokens:r.inputTokens,outputTokens:r.outputTokens});
-        emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:row.company});
-      }catch(err){
-        lastErr=err.message||String(err);
-        if(err.type==='rate_limit'){retries++;const w=rlHit(job.provider,err.wait);
-          emit({type:'log',level:'warn',msg:`⏳ Rate limit "${row.company}" — retry ${Math.round(w/1000)}s (${retries}/5)`});
-          emit({type:'rate_info',delay:rs.delay,hits:rs.hits});await sleep(w);
-        }else if(err.type==='api_error'&&err.message?.includes('empty response')){
-          // Gemini empty response — retry with backoff but don't count as rate limit
-          retries++;const w=Math.min(2000*retries,10000);
-          emit({type:'log',level:'warn',msg:`⚠️ Empty response "${row.company}" — retry ${retries}/5 in ${w/1000}s`});
-          await sleep(w);
-        }else{S.uR.run('error',null,lastErr,0,0,0,0,jobId,row.idx);fail++;done=true;
-          emit({type:'result',idx:row.idx,company:row.company,status:'error',error:lastErr});
-          emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:row.company});}
-      }}
-    if(!done){S.uR.run('error',null,lastErr||'Max retries',0,0,0,0,jobId,row.idx);fail++;
-      emit({type:'result',idx:row.idx,company:row.company,status:'error',error:lastErr||'Max retries'});}
+
+  const t0=Date.now();
+  // Shared counters — workers mutate these; all reads/writes are in the same JS thread (event loop) so no race conditions
+  let ok=job.succeeded,fail=job.failed,tIn=job.total_in,tOut=job.total_out,tCR=job.total_cr,tCW=job.total_cw;
+
+  // Stream already-completed rows back to any reconnecting client
+  for(const r of S.gC.all(jobId))
+    emit({type:'result',idx:r.idx,company:r.company,status:r.status,research:r.research,error:r.error,inputTokens:r.input_tokens,outputTokens:r.output_tokens});
+  emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:'Starting…'});
+
+  // Shared queue — workers pull from the front
+  const queue=[...pending];
+  const concurrency=CONCURRENCY[job.provider]||3;
+
+  // Flush updated job stats to DB periodically
+  const flushStats=()=>{
     const elapsed=((Date.now()-t0)/1000)+job.elapsed;
     const cost=(tIn/1e6)*prov.inputCost+(tOut/1e6)*prov.outputCost+(tCW/1e6)*(prov.cacheWriteCost||0)+(tCR/1e6)*(prov.cacheReadCost||0);
     S.uJ.run(ok,fail,'running',tIn,tOut,tCR,tCW,cost,elapsed,jobId);
-    if(queue.length>0&&!ctx.cancelled)await sleep(rs.delay);
+  };
+
+  // Worker: pulls rows off the queue and processes them until queue is empty or cancelled
+  async function worker(){
+    while(queue.length>0&&!ctx.cancelled){
+      const row=queue.shift();if(!row)break;
+      emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:row.company});
+
+      let retries=0,done=false,lastErr='';
+      while(!done&&retries<5&&!ctx.cancelled){
+        try{
+          const r=await callLLM(row.prompt,prov,job.system_prompt,!!job.use_web_search,apiKey);
+          S.uR.run('success',r.research,null,r.inputTokens,r.outputTokens,r.cacheRead,r.cacheWrite,jobId,row.idx);
+          ok++;tIn+=r.inputTokens;tOut+=r.outputTokens;tCR+=r.cacheRead;tCW+=r.cacheWrite;done=true;rlOk(job.provider);
+          emit({type:'result',idx:row.idx,company:row.company,status:'success',research:r.research,inputTokens:r.inputTokens,outputTokens:r.outputTokens});
+          emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:row.company});
+          flushStats();
+        }catch(err){
+          lastErr=err.message||String(err);
+          if(err.type==='rate_limit'){
+            retries++;
+            const w=rlHit(job.provider,err.wait);
+            emit({type:'log',level:'warn',msg:`⏳ Rate limit "${row.company}" — retry ${Math.round(w/1000)}s (${retries}/5)`});
+            emit({type:'rate_info',delay:w,hits:gRL(job.provider).hits});
+            await sleep(w);
+          }else if(err.type==='api_error'&&(err.message?.includes('empty response')||err.message?.includes('MAX_TOKENS'))){
+            retries++;
+            const w=Math.min(3000*retries,15000);
+            emit({type:'log',level:'warn',msg:`⚠️ Incomplete "${row.company}" — retry ${retries}/5 in ${w/1000}s`});
+            await sleep(w);
+          }else{
+            S.uR.run('error',null,lastErr,0,0,0,0,jobId,row.idx);fail++;done=true;
+            emit({type:'result',idx:row.idx,company:row.company,status:'error',error:lastErr});
+            emit({type:'progress',succeeded:ok,failed:fail,total:job.total_rows,current:row.company});
+            flushStats();
+          }
+        }
+      }
+      if(!done){
+        S.uR.run('error',null,lastErr||'Max retries',0,0,0,0,jobId,row.idx);fail++;
+        emit({type:'result',idx:row.idx,company:row.company,status:'error',error:lastErr||'Max retries'});
+        flushStats();
+      }
+    }
   }
-  const fs=ctx.cancelled?'cancelled':(queue.length>0?'paused':'complete');
+
+  // Launch N workers in parallel and wait for all to finish
+  await Promise.all(Array.from({length:concurrency},()=>worker()));
+
+  const fs=ctx.cancelled?'cancelled':(S.gP.all(jobId).length>0?'paused':'complete');
   const elapsed=((Date.now()-t0)/1000)+job.elapsed;
   const cost=(tIn/1e6)*prov.inputCost+(tOut/1e6)*prov.outputCost+(tCW/1e6)*(prov.cacheWriteCost||0)+(tCR/1e6)*(prov.cacheReadCost||0);
   S.uJ.run(ok,fail,fs,tIn,tOut,tCR,tCW,cost,elapsed,jobId);
