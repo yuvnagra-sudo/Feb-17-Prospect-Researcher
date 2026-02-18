@@ -143,25 +143,21 @@ async function callGemini(prompt,prov,sys,web,apiKey){
   if(!res.ok){const t=await res.text();let m;try{m=JSON.parse(t).error?.message||t}catch{m=t}throw{type:'api_error',message:m};}
   const data=await res.json();
 
-  // ── FIX: robust text extraction from Gemini grounded responses ──
-  // When web search grounding is used, Gemini may return ALL text parts with [cite:N] markers.
-  // The old approach picked only the first non-cited part, returning undefined (→ empty) if all parts had citations.
+  // ── Robust text extraction from Gemini grounded responses ──
+  // Gemini with web search returns multiple text parts interleaved with tool-use parts.
+  // ALWAYS join ALL text parts then strip citations — never pick a single "clean" part,
+  // as the first citation-free chunk is usually just the header/pages-checked section,
+  // which would discard the entire rest of the response.
   const parts=data.candidates?.[0]?.content?.parts||[];
   const u=data.usageMetadata||{};
 
-  // Collect all text parts
-  const allTexts=parts.filter(p=>p.text).map(p=>p.text);
+  // Collect ALL text parts (ignore executableCode, toolUse, etc.)
+  const allTexts=parts.filter(p=>typeof p.text==='string'&&p.text.trim()).map(p=>p.text);
 
-  let research='';
-  if(allTexts.length>0){
-    // Prefer a clean non-cited block if one exists (model summary without inline citations)
-    const clean=allTexts.find(t=>!t.includes('[cite:'));
-    // Fallback: join all text parts and strip citation markers
-    const joined=(clean||allTexts.join('\n')).replace(/\s*\[cite:\s*[\d,\s]+\]/g,'').trim();
-    research=joined;
-  }
+  // Join everything, then strip [cite:N] markers
+  const research=allTexts.join('\n').replace(/\s*\[cite:\s*[\d,\s]+\]/g,'').trim();
 
-  // If we still have no research but the API said it succeeded, mark it as an error so it retries
+  // If empty and zero output tokens, the model returned nothing — retry
   if(!research&&(u.candidatesTokenCount||0)===0){
     throw{type:'api_error',message:'Gemini returned empty response — possible grounding-only output. Will retry.'};
   }
